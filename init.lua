@@ -46,6 +46,8 @@ local Swipe = dofile(hs.spoons.resourcePath("swipe.lua"))
 local PaperWM = {}
 PaperWM.__index = PaperWM
 
+local last_focus = nil
+
 -- Metadata
 PaperWM.name = "PaperWM"
 PaperWM.version = "0.5"
@@ -275,6 +277,7 @@ local function windowEventHandler(window, event, self)
     end
 
     if event == "windowFocused" then
+        last_focus = window:id()
         if pending_window and window == pending_window then
             Timer.doAfter(Window.animationDuration,
                 function()
@@ -742,10 +745,8 @@ function PaperWM:removeWindow(remove_window, skip_new_window_focus)
         self.logger.e("remove index not found")
         return
     end
-
     if not skip_new_window_focus then -- find nearby window to focus
-        local focused_window = Window.focusedWindow()
-        if focused_window and remove_window:id() == focused_window:id() then
+        if last_focus == remove_window:id() then
             for _, direction in ipairs({
                 Direction.DOWN, Direction.UP, Direction.LEFT, Direction.RIGHT
             }) do if self:focusWindow(direction, remove_index) then break end end
