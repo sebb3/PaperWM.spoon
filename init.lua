@@ -107,6 +107,11 @@ PaperWM.default_hotkeys = {
     move_window_9        = { { "alt", "cmd", "shift" }, "9" }
 }
 
+
+hs.fnutils.ieach(table.pack(hs.application.find("Raycast")), function(app)
+    WindowFilter.ignoreAlways[app:name()] = true
+end)
+
 -- filter for windows to manage
 PaperWM.window_filter = WindowFilter.new():setOverrideFilter({
     visible = true,
