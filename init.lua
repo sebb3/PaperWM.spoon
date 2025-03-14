@@ -108,7 +108,8 @@ PaperWM.default_hotkeys = {
 }
 
 
-hs.fnutils.ieach(table.pack(hs.application.find("Raycast")), function(app)
+-- These applications respond very slowly to PaperWM's requests, so we ignore them
+hs.fnutils.ieach(hs.application.applicationsForBundleID("com.apple.WebKit.WebContent"), function(app)
     WindowFilter.ignoreAlways[app:name()] = true
 end)
 
