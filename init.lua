@@ -119,6 +119,17 @@ PaperWM.window_filter = WindowFilter.new():setOverrideFilter({
     hasTitlebar = true,
     allowRoles = "AXStandardWindow"
 })
+PaperWM.app_filter = WindowFilter.new({}):setFilters({
+    default = {
+        activeApplication = true
+    }
+})
+PaperWM.on_screen_filter = WindowFilter.copy(PaperWM.window_filter):setRegions(hs.fnutils.map(hs.screen.allScreens(),
+    function(screen)
+        return screen:fullFrame()
+    end))
+
+PaperWM.app_switcher = hs.window.switcher.new(PaperWM.app_filter)
 
 -- number of pixels between windows
 PaperWM.window_gap = 8
@@ -818,6 +829,19 @@ function PaperWM:focusWindow(direction, focused_index)
     elseif direction == Direction.UP or direction == Direction.DOWN then
         new_focused_window = getWindow(focused_index.space, focused_index.col,
             focused_index.row + (direction // 2))
+
+        if not new_focused_window then
+            local candidateWindows = {}
+            if direction == Direction.DOWN then
+                candidateWindows = self.on_screen_filter:windowsToSouth()
+            end
+            if direction == Direction.UP then
+                candidateWindows = self.on_screen_filter:windowsToNorth()
+            end
+            if candidateWindows then
+                new_focused_window = candidateWindows[1]
+            end
+        end
     end
 
     if not new_focused_window then
@@ -1363,6 +1387,10 @@ function PaperWM:toggleFloating()
     end
 end
 
+function PaperWM:nextAppWindow()
+    self.app_switcher:next()
+end
+
 ---supported window movement actions
 PaperWM.actions = {
     stop_events = partial(PaperWM.stop, PaperWM),
@@ -1403,7 +1431,8 @@ PaperWM.actions = {
     move_window_6 = partial(PaperWM.moveWindowToSpace, PaperWM, 6),
     move_window_7 = partial(PaperWM.moveWindowToSpace, PaperWM, 7),
     move_window_8 = partial(PaperWM.moveWindowToSpace, PaperWM, 8),
-    move_window_9 = partial(PaperWM.moveWindowToSpace, PaperWM, 9)
+    move_window_9 = partial(PaperWM.moveWindowToSpace, PaperWM, 9),
+    next_app_window = partial(PaperWM.nextAppWindow, PaperWM)
 }
 
 ---bind userdefined hotkeys to PaperWM actions
