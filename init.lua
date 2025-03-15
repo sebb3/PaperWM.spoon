@@ -224,9 +224,9 @@ end
 local function getCanvas(screen)
     local screen_frame = screen:frame()
     return Rect(screen_frame.x + PaperWM.window_gap,
-        screen_frame.y + PaperWM.window_gap,
+        screen_frame.y + 40,
         screen_frame.w - (2 * PaperWM.window_gap),
-        screen_frame.h - (2 * PaperWM.window_gap))
+        screen_frame.h - 80)
 end
 
 ---update the column number in window_list to be ascending from provided column up
