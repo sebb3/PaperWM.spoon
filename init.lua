@@ -1,165 +1,97 @@
---- === PaperWM.spoon ===
----
---- Tile windows horizontally. Inspired by PaperWM Gnome extension.
----
---- # Usage
----
---- `PaperWM:start()` will begin automatically tiling new and existing windows.
---- `PaperWM:stop()` will release control over windows.
----
---- Set `PaperWM.window_gap` to the number of pixels to space between windows and
---- the top and bottom screen edges.
----
---- Overwrite `PaperWM.window_filter` to ignore specific applications. For example:
----
---- ```
---- PaperWM.window_filter = PaperWM.window_filter:setAppFilter("Finder", false)
---- PaperWM:start() -- restart for new window filter to take effect
---- ```
----
---- # Limitations
----
---- MacOS does not allow a window to be moved fully off-screen. Windows that would
---- be tiled off-screen are placed in a margin on the left and right edge of the
---- screen. They are still visible and clickable.
----
---- It's difficult to detect when a window is dragged from one space or screen to
---- another. Use the move_window_N commands to move windows between spaces and
---- screens.
----
---- Arrange screens vertically to prevent windows from bleeding into other screens.
----
----
---- Download: [https://github.com/mogenson/PaperWM.spoon](https://github.com/mogenson/PaperWM.spoon)
+-- Types
+
+---@alias Index { row: number, col: number, space: SpaceIdx }
+---@alias SpaceIdx number a Mission Control space index
+---@alias Mapping { [string]: (table | string)[]}
+---@alias Window hs.window
+---@alias WindowId integer
+---@alias WindowFilter hs.window.filter
 
 local Rect <const> = hs.geometry.rect
 local Screen <const> = hs.screen
-local Spaces <const> = hs.spaces
 local Timer <const> = hs.timer
 local Watcher <const> = hs.uielement.watcher
 local Window <const> = hs.window
 local WindowFilter <const> = hs.window.filter
 local partial <const> = hs.fnutils.partial
 
-
 local Swipe = dofile(hs.spoons.resourcePath("swipe.lua"))
 
-local PaperWM = {}
-PaperWM.__index = PaperWM
 
-local last_focus = nil
-
--- Metadata
-PaperWM.name = "YabaiPaperWM"
-PaperWM.version = "0.1"
-PaperWM.author = "sebb3, on the shoulders of mogenson"
-PaperWM.homepage = "https://github.com/sebb3/YabaiPaperWM.spoon"
-PaperWM.license = "MIT - https://opensource.org/licenses/MIT"
-
--- Types
+---@alias WindowList table<SpaceIdx, table<number, table<number, Window>>>
 
 ---@class PaperWM
----@class Window
----@field frame fun(self: Window) : Frame
----@field screen fun(self: Window) : Screen
----@field id fun(self: Window) : number
----@field application fun(self: Window) : Application
-
----@alias Application userdata hs.application
----@alias Rect { x: number, y: number, w: number, h: number } hs.geometry.rect
----@alias Frame Rect
----@alias Index { row: number, col: number, space: SpaceIdx }
----@alias SpaceIdx number a Mission Control space index
----@alias Mapping { [string]: (table | string)[]}
-
----@class YabaiSpace
----@field index SpaceIdx
----@field windows integer[]
-
----@class Screen
----@field frame Frame
-
-PaperWM.default_hotkeys = {
-    stop_events          = { { "alt", "cmd", "shift" }, "q" },
-    refresh_windows      = { { "alt", "cmd", "shift" }, "r" },
-    toggle_floating      = { { "alt", "cmd", "shift" }, "escape" },
-    focus_left           = { { "alt", "cmd" }, "left" },
-    focus_right          = { { "alt", "cmd" }, "right" },
-    focus_up             = { { "alt", "cmd" }, "up" },
-    focus_down           = { { "alt", "cmd" }, "down" },
-    swap_left            = { { "alt", "cmd", "shift" }, "left" },
-    swap_right           = { { "alt", "cmd", "shift" }, "right" },
-    swap_up              = { { "alt", "cmd", "shift" }, "up" },
-    swap_down            = { { "alt", "cmd", "shift" }, "down" },
-    center_window        = { { "alt", "cmd" }, "c" },
-    full_width           = { { "alt", "cmd" }, "f" },
-    cycle_width          = { { "alt", "cmd" }, "r" },
-    cycle_height         = { { "alt", "cmd", "shift" }, "r" },
-    reverse_cycle_width  = { { "ctrl", "alt", "cmd" }, "r" },
-    reverse_cycle_height = { { "ctrl", "alt", "cmd", "shift" }, "r" },
-    slurp_in             = { { "alt", "cmd" }, "i" },
-    barf_out             = { { "alt", "cmd" }, "o" },
-    switch_space_l       = { { "alt", "cmd" }, "," },
-    switch_space_r       = { { "alt", "cmd" }, "." },
-    switch_space_1       = { { "alt", "cmd" }, "1" },
-    switch_space_2       = { { "alt", "cmd" }, "2" },
-    switch_space_3       = { { "alt", "cmd" }, "3" },
-    switch_space_4       = { { "alt", "cmd" }, "4" },
-    move_window_1        = { { "alt", "cmd", "shift" }, "1" },
-    move_window_2        = { { "alt", "cmd", "shift" }, "2" },
-    move_window_3        = { { "alt", "cmd", "shift" }, "3" },
-    move_window_4        = { { "alt", "cmd", "shift" }, "4" },
+---@field Yabai Yabai
+---@field window_list WindowList 3D array of tiles in order of [space][x][y]
+---@field index_table table<integer, Index> dictionary of {space, x, y} with window id for keys
+---@field ui_watchers table<integer, hs.uielement.watcher> dictionary of uielement watchers with window id for keys
+---@field is_floating table<integer, boolean> dictionary of boolean with window id for keys
+---@field is_maximized table<integer, boolean> dictionary of boolean with window id for keys
+---@field window_filter WindowFilter  filter for windows to manage
+---@field app_switcher hs.window.switcher
+---@field last_focus integer|nil
+---@field mouseUpWatcher hs.eventtap|nil
+---@field swipe_gain number increase this number to make windows move futher when swiping
+---@field swipe_fingers integer number of fingers to detect a horizontal swipe, set to 0 to disable
+---@field logger hs.logger
+---@field screen_margin integer size of the on-screen margin to place off-screen windows
+---@field window_gap integer gap between windows
+---@field window_ratios number[]
+local PaperWM = {
+    name = "YabaiPaperWM",
+    version = "0.1",
+    author = "sebb3, on the shoulders of mogenson",
+    homepage = "https://github.com/sebb3/YabaiPaperWM.spoon",
+    license = "MIT - https://opensource.org/licenses/MIT",
+    default_hotkeys = {
+        stop_events          = { { "alt", "cmd", "shift" }, "q" },
+        refresh_windows      = { { "alt", "cmd", "shift" }, "r" },
+        toggle_floating      = { { "alt", "cmd", "shift" }, "escape" },
+        focus_left           = { { "alt", "cmd" }, "left" },
+        focus_right          = { { "alt", "cmd" }, "right" },
+        focus_up             = { { "alt", "cmd" }, "up" },
+        focus_down           = { { "alt", "cmd" }, "down" },
+        swap_left            = { { "alt", "cmd", "shift" }, "left" },
+        swap_right           = { { "alt", "cmd", "shift" }, "right" },
+        swap_up              = { { "alt", "cmd", "shift" }, "up" },
+        swap_down            = { { "alt", "cmd", "shift" }, "down" },
+        center_window        = { { "alt", "cmd" }, "c" },
+        full_width           = { { "alt", "cmd" }, "f" },
+        cycle_width          = { { "alt", "cmd" }, "r" },
+        cycle_height         = { { "alt", "cmd", "shift" }, "r" },
+        reverse_cycle_width  = { { "ctrl", "alt", "cmd" }, "r" },
+        reverse_cycle_height = { { "ctrl", "alt", "cmd", "shift" }, "r" },
+        slurp_in             = { { "alt", "cmd" }, "i" },
+        barf_out             = { { "alt", "cmd" }, "o" },
+        switch_space_l       = { { "alt", "cmd" }, "," },
+        switch_space_r       = { { "alt", "cmd" }, "." },
+        switch_space_1       = { { "alt", "cmd" }, "1" },
+        switch_space_2       = { { "alt", "cmd" }, "2" },
+        switch_space_3       = { { "alt", "cmd" }, "3" },
+        switch_space_4       = { { "alt", "cmd" }, "4" },
+        move_window_1        = { { "alt", "cmd", "shift" }, "1" },
+        move_window_2        = { { "alt", "cmd", "shift" }, "2" },
+        move_window_3        = { { "alt", "cmd", "shift" }, "3" },
+        move_window_4        = { { "alt", "cmd", "shift" }, "4" },
+    },
+    window_list = {},
+    index_table = {},
+    ui_watchers = {},
+    is_floating = {},
+    x_positions = {},
+    window_gap = 8,
+    window_ratios = { 0.23607, 0.38195, 0.61804 },
+    screen_margin = 1,
+    swipe_fingers = 0,
+    swipe_gain = 1,
+    logger = hs.logger.new("PaperWM")
 }
-PaperWM.Yabai = nil
 
--- These applications respond very slowly to PaperWM's requests, so we ignore them
-hs.fnutils.ieach(hs.application.applicationsForBundleID("com.apple.WebKit.WebContent"), function(app)
-    WindowFilter.ignoreAlways[app:name()] = true
-end)
+PaperWM.__index = PaperWM
 
--- filter for windows to manage
-PaperWM.window_filter = WindowFilter.new():setOverrideFilter({
-    visible = true,
-    fullscreen = false,
-    hasTitlebar = true,
-    allowRoles = "AXStandardWindow"
-})
 
-PaperWM.same_app_filter = WindowFilter.new({}):setFilters({
-    default = {
-        activeApplication = true
-    }
-})
 
-PaperWM.on_screen_filter = WindowFilter.copy(PaperWM.window_filter)
-    :setRegions(
-        hs.fnutils.map(
-            hs.screen.allScreens(),
-            function(screen)
-                return screen:fullFrame()
-            end
-        )
-    )
 
-PaperWM.app_switcher = hs.window.switcher.new(PaperWM.same_app_filter)
-
--- number of pixels between windows
-PaperWM.window_gap = 8
-
--- ratios to use when cycling widths and heights, golden ratio by default
-PaperWM.window_ratios = { 0.23607, 0.38195, 0.61804 }
-
--- size of the on-screen margin to place off-screen windows
-PaperWM.screen_margin = 1
-
--- number of fingers to detect a horizontal swipe, set to 0 to disable
-PaperWM.swipe_fingers = 0
-
--- increase this number to make windows move futher when swiping
-PaperWM.swipe_gain = 1
-
--- logger
-PaperWM.logger = hs.logger.new(PaperWM.name)
 
 -- constants
 ---@enum Direction
@@ -184,26 +116,21 @@ end
 local IsFloatingKey <const> = 'PaperWM_is_floating'
 
 -- array of windows sorted from left to right
-PaperWM.window_list = {} -- 3D array of tiles in order of [space][x][y] --- [[@as table<SpaceIdx, table<number, table<number, Window>>]]
-PaperWM.index_table = {} -- dictionary of {space, x, y} with window id for keys ---[[@as table<int, { space: SpaceIdx, x: number, y: number }]]
-PaperWM.ui_watchers = {} -- dictionary of uielement watchers with window id for keys
-PaperWM.is_floating = {} -- dictionary of boolean with window id for keys --- [[@as { [number]: boolean }]]
-PaperWM.x_positions = {} -- dictionary of horizontal positions with [space][window] for keys --- [[@as { [SpaceIdx]: { [Window]: number } }]]
+
 
 -- refresh window layout on screen change
 PaperWM.screen_watcher = Screen.watcher.new(function() PaperWM:refreshWindows() end)
 
 ---return the first window that's completely on the screen
 ---@param space SpaceIdx space to lookup windows
----@param screen_frame Frame the coordinates of the screen
+---@param screen_frame hs.geometry the coordinates of the screen
 ---@param direction Direction|nil either LEFT or RIGHT
 ---@return Window|nil
-local function getFirstVisibleWindow(space, screen_frame, direction)
+function PaperWM:getFirstVisibleWindow(space, screen_frame, direction)
     direction = direction or Direction.LEFT
     local distance = math.huge
     local closest = nil
-
-    for _, windows in ipairs(PaperWM.window_list[space] or {}) do
+    for _, windows in ipairs(self.window_list[space] or {}) do
         local window = windows[1] -- take first window in column
         local d = (function()
             local windowFrame = window:frame()
@@ -231,16 +158,15 @@ end
 
 ---get a window in a row, in a column, in a space from the window_list
 ---@param space SpaceIdx
----@param col number
----@param row number
+---@param col integer
+---@param row integer
 ---@return Window
 local function getWindow(space, col, row)
     return (getColumn(space, col) or {})[row]
 end
 
 ---get the tileable bounds for a screen
----@param screen Screen
----@return Frame
+---@param screen hs.screen
 local function getCanvas(screen)
     local screen_frame = screen:frame()
     return Rect(screen_frame.x + PaperWM.window_gap,
@@ -275,9 +201,9 @@ local function updateVirtualPositions(space, windows, x)
 end
 
 ---save the is_floating list to settings
-local function persistFloatingList()
+function PaperWM:persistFloatingList()
     local persisted = {}
-    for k, _ in pairs(PaperWM.is_floating) do
+    for k, _ in pairs(self.is_floating) do
         table.insert(persisted, k)
     end
     hs.settings.set(IsFloatingKey, persisted)
@@ -288,107 +214,58 @@ local function loadFloatingList()
 end
 
 local prev_focused_window = nil ---@type Window|nil
-local pending_window = nil ---@type Window|nil
+
+function PaperWM:watchForDragRelease(window, event)
+    self.mouseUpWatcher = hs.eventtap.new({ hs.eventtap.event.types.leftMouseUp }, function()
+        self.mouseUpWatcher:stop()
+        self.mouseUpWatcher = nil
+        self:windowEventHandler(window, event)
+    end):start()
+end
 
 ---callback for window events
 ---@param window Window
 ---@param event string name of the event
----@param self PaperWM
 function PaperWM:windowEventHandler(window, event)
-    self.logger.df("%s for [%s] id: %d", event, window,
-        window and window:id() or -1)
-    local space = nil
+    if not coroutine.isyieldable() then
+        coroutine.wrap(partial(self.windowEventHandler, self, window, event))()
+        return
+    end
 
-    --[[ When a new window is created, We first get a windowVisible event but
-    without a Space. Next we receive a windowFocused event for the window, but
-    this also sometimes lacks a Space. Our approach is to store the window
-    pending a Space in the pending_window variable and set a timer to try to add
-    the window again later. Also schedule the windowFocused handler to run later
-    after the window was added ]]
-    --
+
+    self.logger.df("%s for [%s] id: %d. isDragging: %s", event, window, window:id(), window:isDragging())
+
+    if window:isDragging() then return end
+    local space = nil
 
     if self.is_floating[window:id()] then
         -- this event is only meaningful for floating windows
         if event == "windowDestroyed" then
             self.is_floating[window:id()] = nil
-            persistFloatingList()
+            self:persistFloatingList()
         end
         -- no other events are meaningful for floating windows
         return
     end
 
     if event == "windowFocused" then
-        last_focus = window:id()
-        if pending_window and window == pending_window then
-            Timer.doAfter(Window.animationDuration,
-                function()
-                    self.logger.vf("pending window timer for %s", window)
-                    self:windowEventHandler(window, event)
-                end
-            )
-            return
-        end
         prev_focused_window = window -- for addWindow()
-        self.Yabai:getSpaces(
-            function(data)
-                space = hs.fnutils.filter(data,
-                    function(spc)
-                        return hs.fnutils.some(spc.windows,
-                            function(winId)
-                                return winId == window:id()
-                            end
-                        )
-                    end
-                )[1]
-            end
-        )
     elseif event == "windowVisible" or event == "windowUnfullscreened" then
-        space = self:addWindow(window)
-        if pending_window and window == pending_window then
-            pending_window = nil -- tried to add window for the second time
-        elseif not space then
-            pending_window = window
-            Timer.doAfter(Window.animationDuration,
-                partial(self.windowEventHandler, window, event)
-            )
-            return
-        end
+        self:addWindow(window)
     elseif event == "windowNotVisible" then
         space = self:removeWindow(window)
     elseif event == "windowFullscreened" then
         space = self:removeWindow(window, true) -- don't focus new window if fullscreened
     elseif event == "AXWindowMoved" or event == "AXWindowResized" then
-        self.Yabai:getSpaces(
-            function(spaces)
-                space = hs.fnutils.filter(spaces,
-                    function(spc)
-                        return hs.fnutils.some(spc.windows,
-                            function(winId)
-                                return winId == window:id()
-                            end
-                        )
-                    end
-                )[1]
-            end
-        )
+        self.logger.df("%s", window:frame())
     end
-    self.Yabai:getSpaces(function(data)
-        local space = hs.fnutils.filter(data,
-            function(spc)
-                return hs.fnutils.some(spc.windows,
-                    function(winId)
-                        return winId == window:id()
-                    end
-                )
-            end
-        )[1]
-        if space then self:tileSpace(space.index) end
-    end)
+    space = space or window:space()
+    self:tileSpace(space)
 end
 
 ---generate callback fucntion for touchpad swipe gesture event
 ---@param self PaperWM
-local function swipeHandler(self)
+function PaperWM:swipeHandler()
     -- saved upvalues between callback function calls
     local space, screen_frame = nil, nil
 
@@ -409,13 +286,13 @@ local function swipeHandler(self)
             end
 
             -- get focused window index
-            local focused_index = index_table[focused_window:id()]
+            local focused_index = self.index_table[focused_window:id()]
             if not focused_index then
                 self.logger.e("focused index not found")
                 return
             end
 
-            local screen = Screen(Spaces.spaceDisplay(focused_index.space))
+            local screen = self.Yabai:getScreenForSpace(focused_index.space)
             if not screen then
                 self.logger.e("no screen for space")
                 return
@@ -426,9 +303,9 @@ local function swipeHandler(self)
             space        = focused_index.space
 
             -- stop all window moved watchers
-            for window, _ in pairs(x_positions[space] or {}) do
+            for window, _ in pairs(self.x_positions[space] or {}) do
                 if not window then break end
-                local watcher = ui_watchers[window:id()]
+                local watcher = self.ui_watchers[window:id()]
                 if watcher then
                     watcher:stop()
                 end
@@ -441,9 +318,9 @@ local function swipeHandler(self)
             end
 
             -- restart all window moved watchers
-            for window, _ in pairs(x_positions[space] or {}) do
+            for window, _ in pairs(self.x_positions[space] or {}) do
                 if not window then break end
-                local watcher = ui_watchers[window:id()]
+                local watcher = self.ui_watchers[window:id()]
                 if watcher then
                     watcher:start({ Watcher.windowMoved, Watcher.windowResized })
                 end
@@ -455,10 +332,10 @@ local function swipeHandler(self)
                 local frame = focused_window:frame()
                 local visible_window = (function()
                     if frame.x < screen_frame.x then
-                        return getFirstVisibleWindow(space, screen_frame,
+                        return self:getFirstVisibleWindow(space, screen_frame,
                             Direction.LEFT)
                     elseif frame.x2 > screen_frame.x2 then
-                        return getFirstVisibleWindow(space, screen_frame,
+                        return self:getFirstVisibleWindow(space, screen_frame,
                             Direction.RIGHT)
                     end
                 end)()
@@ -488,7 +365,7 @@ local function swipeHandler(self)
             local left_margin  = screen_frame.x + self.screen_margin
             local right_margin = screen_frame.x2 - self.screen_margin
 
-            for window, x in pairs(x_positions[space] or {}) do
+            for window, x in pairs(self.x_positions[space] or {}) do
                 if not window then break end
                 x = x + dx
                 local frame = window:frame()
@@ -498,23 +375,70 @@ local function swipeHandler(self)
                     frame.x = math.max(x, left_margin - frame.w)
                 end
                 window:setTopLeft(frame.x, frame.y) -- avoid the animationDuration
-                x_positions[space][window] = x      -- update virtual position
+                self.x_positions[space][window] = x -- update virtual position
             end
         end
     end
+end
+
+function PaperWM:screensHaveSeparateSpaces()
+    return hs.spaces.screensHaveSeparateSpaces()
+end
+
+function PaperWM:init()
+    self.window_filter = WindowFilter.new():setOverrideFilter({
+        visible = true,
+        fullscreen = false,
+        hasTitlebar = true,
+        allowRoles = "AXStandardWindow"
+    })
+    self.same_app_filter = WindowFilter.new({}):setFilters({
+        default = {
+            activeApplication = true
+        }
+    })
+    self.on_screen_filter = WindowFilter.copy(self.window_filter)
+        :setRegions(
+            hs.fnutils.map(
+                hs.screen.allScreens(),
+                function(screen)
+                    return screen:fullFrame()
+                end
+            )
+        )
+    self.app_switcher = hs.window.switcher.new(PaperWM.same_app_filter)
+    self.window_list = setmetatable(self.window_list, {
+        __tostring =
+        ---@param list WindowList
+            function(list)
+                local result = ""
+                for i, v in pairs(list) do
+                    result = result .. string.format("Space %s: \n", i)
+
+                    for x, ys in pairs(v) do
+                        result = result .. string.format("x %d:\n", x)
+                        for y, w in pairs(ys) do
+                            result = result .. string.format("y %d:\n", y)
+                            result = result .. string.format("window: %s\n", w:title())
+                        end
+                    end
+                end
+                return result
+            end
+    })
 end
 
 ---start automatic window tiling
 ---@return PaperWM
 function PaperWM:start()
     -- check for some settings
-    if not Spaces.screensHaveSeparateSpaces() then
+    if not self:screensHaveSeparateSpaces() then
         self.logger.e(
             "please check 'Displays have separate Spaces' in System Preferences -> Mission Control")
     end
 
     -- clear state
-    self.window_list = {}
+    for i, _ in pairs(self.window_list) do self.window_list[i] = {} end
     self.index_table = {}
     self.ui_watchers = {}
     self.is_floating = {}
@@ -522,7 +446,6 @@ function PaperWM:start()
 
     self.Yabai = spoon.Yabai
     assert(self.Yabai, "Yabai spoon not found")
-
     -- restore saved is_floating state, filtering for valid windows
     for _, id in ipairs(loadFloatingList()) do
         local window = Window.get(id)
@@ -531,7 +454,7 @@ function PaperWM:start()
         end
     end
 
-    persistFloatingList()
+    self:persistFloatingList()
 
     -- populate window list, index table, ui_watchers, and set initial layout
     self:refreshWindows()
@@ -552,7 +475,7 @@ function PaperWM:start()
 
     -- recognize horizontal touchpad swipe gestures
     if self.swipe_fingers > 1 then
-        Swipe:start(self.swipe_fingers, swipeHandler(self))
+        Swipe:start(self.swipe_fingers, self:swipeHandler())
     end
 
     return self
@@ -565,7 +488,7 @@ function PaperWM:stop()
     self.window_filter:unsubscribeAll()
     self.on_screen_filter:unsubscribeAll()
     self.same_app_filter:unsubscribeAll()
-    self.app_switcher:stop()
+    self.app_switcher = nil
     self.screen_watcher:stop()
     hs.fnutils.each(self.ui_watchers, function(watcher) watcher:stop() end)
 
@@ -582,7 +505,7 @@ end
 
 ---tile a column of window by moving and resizing
 ---@param windows Window[] column of windows
----@param bounds Frame bounds to constrain column of tiled windows
+---@param bounds hs.geometry bounds to constrain column of tiled windows
 ---@param h number|nil set windows to specified height
 ---@param w number|nil set windows to specified width
 ---@param id number|nil id of window to set specific height
@@ -621,27 +544,28 @@ function PaperWM:tileColumn(windows, bounds, h, w, id, h4id)
 end
 
 ---tile all column in a space by moving and resizing windows
----@param space Space
+---@param space SpaceIdx
 function PaperWM:tileSpace(space)
-    if not space or Spaces.spaceType(space) ~= "user" then
-        self.logger.e("current space invalid")
+    assert(space)
+
+    if not coroutine.isyieldable() then
+        coroutine.wrap(partial(self.tileSpace, self, space))()
         return
     end
 
     -- find screen for space
-    local screen = Screen(Spaces.spaceDisplay(space))
-    if not screen then
-        self.logger.e("no screen for space")
-        return
-    end
+    local screen = self.Yabai:getScreenForSpace(space)
+    assert(screen)
 
     -- if focused window is in space, tile from that
     local focused_window = Window.focusedWindow()
     local anchor_window = (function()
-        if focused_window and not self.is_floating[focused_window:id()] and Spaces.windowSpaces(focused_window)[1] == space then
+        if focused_window and
+            not self.is_floating[focused_window:id()] and
+            focused_window:space() == space then
             return focused_window
         else
-            return getFirstVisibleWindow(space, screen:frame())
+            return self:getFirstVisibleWindow(space, screen:frame())
         end
     end)()
 
@@ -704,8 +628,7 @@ function PaperWM:tileSpace(space)
             x = math.min(x, right_margin),
             x2 = nil,
             y = canvas.y,
-            y2 =
-                canvas.y2
+            y2 = canvas.y2
         }
         local column = getColumn(space, col)
         local width = self:tileColumn(column, bounds)
@@ -740,7 +663,7 @@ function PaperWM:refreshWindows()
             -- add window
             local space = self:addWindow(window)
             if space then retile_spaces[space] = true end
-        elseif index.space ~= Spaces.windowSpaces(window)[1] then
+        elseif index.space ~= window:space() then
             -- move to window list in new space
             self:removeWindow(window)
             local space = self:addWindow(window)
@@ -773,56 +696,59 @@ function PaperWM:addWindow(add_window)
     -- check if window is already in window list
     if self.index_table[add_window:id()] then return end
 
-    local space = Spaces.windowSpaces(add_window)[1]
-    if not space then
-        self.logger.e("add window does not have a space")
-        return
-    end
-    if not self.window_list[space] then self.window_list[space] = {} end
+    coroutine.wrap(function()
+        local space = add_window:space()
+        if not self.window_list[space] then self.window_list[space] = {} end
 
-    -- find where to insert window
-    local add_column = 1
+        -- find where to insert window
+        local add_column = 1
 
-    -- when addWindow() is called from a window created event:
-    -- focused_window from previous window focused event will not be add_window
-    -- hs.window.focusedWindow() will return add_window
-    -- new window focused event for add_window has not happened yet
-    if prev_focused_window and
-        ((self.index_table[prev_focused_window:id()] or {}).space == space) and
-        (prev_focused_window:id() ~= add_window:id()) then
-        add_column = self.index_table[prev_focused_window:id()].col +
-            1 -- insert to the right
-    else
-        local x = add_window:frame().center.x
-        for col, windows in ipairs(self.window_list[space]) do
-            if x < windows[1]:frame().center.x then
-                add_column = col
-                break
+        -- when addWindow() is called from a window created event:
+        -- focused_window from previous window focused event will not be add_window
+        -- hs.window.focusedWindow() will return add_window
+        -- new window focused event for add_window has not happened yet
+        if prev_focused_window and
+            ((self.index_table[prev_focused_window:id()] or {}).space == space) and
+            (prev_focused_window:id() ~= add_window:id()) then
+            add_column = self.index_table[prev_focused_window:id()].col +
+                1 -- insert to the right
+        else
+            local x = add_window:frame().center.x
+            for col, windows in ipairs(self.window_list[space]) do
+                if x < windows[1]:frame().center.x then
+                    add_column = col
+                    break
+                end
             end
         end
-    end
 
-    -- add window
-    table.insert(self.window_list[space], add_column, { add_window })
+        -- add window
+        table.insert(self.window_list[space], add_column, { add_window })
 
-    -- update index table
-    updateIndexTable(space, add_column)
+        -- update index table
+        updateIndexTable(space, add_column)
 
-    -- subscribe to window moved events
-    local watcher = add_window:newWatcher(
-        function(window, event, _)
-            self:windowEventHandler(window, event)
-        end, self)
-    watcher:start({ Watcher.windowMoved, Watcher.windowResized })
-    self.ui_watchers[add_window:id()] = watcher
+        -- subscribe to window moved events
+        self.ui_watchers[add_window:id()] = add_window:newWatcher(
+            function(window, event, watcher, userData)
+                coroutine.wrap(function()
+                    if self.mouseUpWatcher and self.mouseUpWatcher:isEnabled() then return end
+                    if window:isDragging() then
+                        self:watchForDragRelease(window, event)
+                        return
+                    end
+                    self:windowEventHandler(window, event)
+                end)()
+            end):start({ Watcher.windowMoved, Watcher.windowResized })
 
-    return space
+        return space
+    end)()
 end
 
 ---remove a window from being tracked and automatically tiled
 ---@param remove_window Window window to be removed
 ---@param skip_new_window_focus boolean|nil don't focus a nearby window if true
----@return Space|nil space that contained removed window
+---@return SpaceIdx|nil space that contained removed window
 function PaperWM:removeWindow(remove_window, skip_new_window_focus)
     -- get index of window
     local remove_index = self.index_table[remove_window:id()]
@@ -831,7 +757,7 @@ function PaperWM:removeWindow(remove_window, skip_new_window_focus)
         return
     end
     if not skip_new_window_focus then -- find nearby window to focus
-        if last_focus == remove_window:id() then
+        if self.last_focus == remove_window:id() then
             for _, direction in ipairs({
                 Direction.DOWN, Direction.UP, Direction.LEFT, Direction.RIGHT
             }) do if self:focusWindow(direction, remove_index) then break end end
@@ -1042,6 +968,10 @@ end
 ---move the focused window to the center of the screen, horizontally
 ---don't resize the window or change it's vertical position
 function PaperWM:centerWindow()
+    if not coroutine.isyieldable() then
+        coroutine.wrap(partial(self.centerWindow, self))()
+        return
+    end
     -- get current focused window
     local focused_window = Window.focusedWindow()
     if not focused_window then
@@ -1059,7 +989,7 @@ function PaperWM:centerWindow()
     self:moveWindow(focused_window, focused_frame)
 
     -- update layout
-    local space = Spaces.windowSpaces(focused_window)[1]
+    local space = focused_window:space()
     self:tileSpace(space)
 end
 
@@ -1093,7 +1023,7 @@ function PaperWM:toggleWindowFullWidth()
 
         -- update layout
         self:moveWindow(focused_window, focused_frame)
-        local space = Spaces.windowSpaces(focused_window)[1]
+        local space = focused_window:space()
         self:tileSpace(space)
     end
 end
@@ -1173,7 +1103,7 @@ function PaperWM:cycleWindowSize(direction, cycle_direction)
     self:moveWindow(focused_window, focused_frame)
 
     -- update layout
-    local space = Spaces.windowSpaces(focused_window)[1]
+    local space = focused_window:space()
     self:tileSpace(space)
 end
 
@@ -1295,16 +1225,18 @@ function PaperWM:barfWindow()
 end
 
 ---switch to a Mission Control space
----@param index number incremental id for space
-function PaperWM:switchToSpace(index) --TODO
-    if not space then
-        self.logger.d("space not found")
+---@param index SpaceIdx incremental id for space
+function PaperWM:switchToSpace(index)
+    assert(index)
+    if not coroutine.isyieldable() then
+        coroutine.wrap(partial(self.switchToSpace, self, index))()
         return
     end
 
-    local screen = Screen(Spaces.spaceDisplay(space))
-    local window = getFirstVisibleWindow(space, screen:frame())
-    self.Yabai:focusSpace(index, window)
+    local screen = self.Yabai:getScreenForSpace(index)
+    local window = self:getFirstVisibleWindow(index, screen:frame())
+    self.Yabai:focusSpace(index)
+    if window then window:focus() end
 end
 
 ---switch to a Mission Control space to the left or right of current space
@@ -1341,7 +1273,7 @@ function PaperWM:moveWindowToSpace(index)
         self.logger.e("focused index not found")
         return
     end
-    self.Yabai:moveToSpace(index, focused_window:id())
+    coroutine.wrap(partial(self.Yabai.moveToSpace, self.Yabai, index, focused_window:id()))()
 
     -- cache a copy of focused_window, don't switch focus when removing window
     local old_space = self:removeWindow(focused_window, true)
@@ -1358,7 +1290,7 @@ end
 ---move and resize a window to the coordinates specified by the frame
 ---disable watchers while window is moving and re-enable after
 ---@param window Window window to move
----@param frame Frame coordinates to set window size and location
+---@param frame hs.geometry coordinates to set window size and location
 function PaperWM:moveWindow(window, frame)
     -- greater than 0.017 hs.window animation step time
     local padding <const> = 0.02
@@ -1401,7 +1333,7 @@ function PaperWM:toggleFloating(window, value)
     end
 
     self.is_floating[id] = _value
-    persistFloatingList()
+    self:persistFloatingList()
 
     local space = (function()
         if self.is_floating[id] then
@@ -1435,57 +1367,25 @@ function PaperWM:dialogWindow(w)
     w:setFrame(frame)
 end
 
-local beforeTerm = nil
-
-local returnFilter = WindowFilter.new({
-    ["WezTerm"] = { allowRoles = "*", focused = true },
-})
-returnFilter:subscribe(WindowFilter.windowUnfocused, function(window)
-    PaperWM:toggleFloating(window, false)
-end)
-
-function PaperWM:toggleTerminal()
-    local fw = hs.window.focusedWindow()
-    hs.printf("Focused window: %s, captured by filter: %s", hs.inspect(fw), wezTermWnd:isWindowAllowed(fw))
-
-    if fw and wezTermWnd:isWindowAllowed(fw) then
-        hs.printf("Terminal is active. Focusing %s", hs.inspect(beforeTerm))
-        if beforeTerm then
-            beforeTerm:focus()
-        end
-        return
-    else
-        beforeTerm = fw
-        hs.printf("Before term: %s", hs.inspect(beforeTerm))
-    end
-
-    local wnd = wezTermWnd:getWindows()[1]
-    if not wnd then
-        hs.application.launchOrFocus("Hammerspoon")
-        wnd = wezTermWnd:getWindows()[1]
-    end
-
-    self:toggleFloating(wnd, true)
-    self:dialogWindow(wnd)
-    wnd:focus()
-end
-
-local consoleWf = WindowFilter.new({}):setAppFilter("Hammerspoon", true)
-
 function PaperWM:toggleConsole()
-    local w = consoleWf:getWindows()[1]
-    self:toggleFloating(w, true)
-    self:dialogWindow(w)
+    hs.toggleConsole()
+    local w = hs.console:hswindow()
+    -- self:toggleFloating(w, true)
+    -- self:dialogWindow(w)
 
-    self.Yabai:scratchpad(w:id(), "console")
-
-    self.Yabai:toggle("console")
+    if not w then return end
     local ax = hs.axuielement.windowElement(w)
     local inputs = {}
-    ax:allDescendantElements(function(_, els)
-        inputs = hs.fnutils.filter(els, function(el) return el:role() == "AXTextField" end)
+    if not ax then return end
+
+    ax:allDescendantElements(
+        function(_, els)
+            inputs = hs.fnutils.filter(els, function(el) return el:role() == "AXTextField" end)
+        end
+    )
+    if inputs and #inputs > 0 then
         inputs[1]:focus()
-    end)
+    end
 end
 
 ---supported window movement actions
@@ -1532,7 +1432,6 @@ PaperWM.actions = {
     move_window_8 = partial(PaperWM.moveWindowToSpace, PaperWM, 8),
     move_window_9 = partial(PaperWM.moveWindowToSpace, PaperWM, 9),
     next_app_window = partial(PaperWM.nextAppWindow, PaperWM),
-    toggle_terminal = partial(PaperWM.toggleTerminal, PaperWM),
     toggle_console = partial(PaperWM.toggleConsole, PaperWM)
 }
 
